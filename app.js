@@ -52,8 +52,18 @@ function mbFormat(media) {
   return f ? 'Other music' : null;
 }
 
+// ---------- eBay countries ----------
+const EBAY = {
+  EBAY_AU: ['Australia', 'www.ebay.com.au'], EBAY_US: ['United States', 'www.ebay.com'], EBAY_GB: ['United Kingdom', 'www.ebay.co.uk'],
+  EBAY_CA: ['Canada', 'www.ebay.ca'], EBAY_IE: ['Ireland', 'www.ebay.ie'], EBAY_DE: ['Germany', 'www.ebay.de'], EBAY_FR: ['France', 'www.ebay.fr'],
+  EBAY_IT: ['Italy', 'www.ebay.it'], EBAY_ES: ['Spain', 'www.ebay.es'], EBAY_NL: ['Netherlands', 'www.ebay.nl'],
+};
+const guessMarket = () => { const r = (navigator.language || '').split('-')[1]; return { AU: 'EBAY_AU', NZ: 'EBAY_AU', GB: 'EBAY_GB', UK: 'EBAY_GB', CA: 'EBAY_CA', IE: 'EBAY_IE', DE: 'EBAY_DE', FR: 'EBAY_FR', IT: 'EBAY_IT', ES: 'EBAY_ES', NL: 'EBAY_NL' }[r] || 'EBAY_US'; };
+const ebayHost = () => EBAY[S.ebayMarket]?.[1] || 'www.ebay.com';
+const money = (v, cur) => v == null ? '–' : new Intl.NumberFormat(navigator.language || 'en', { style: 'currency', currency: cur || 'USD', maximumFractionDigits: 2 }).format(v);
+
 // ---------- settings ----------
-const S = Object.assign({ discogsToken: '', proxyUrl: '', pcToken: '', beep: true, autoAdd: true, mode: 'check', format: '' },
+const S = Object.assign({ discogsToken: '', proxyUrl: '', pcToken: '', beep: true, autoAdd: true, mode: 'check', format: '', ebayMarket: guessMarket() },
   safeJSON(lsGet('stacks.settings')) || {});
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function saveS() { try { localStorage.setItem('stacks.settings', JSON.stringify(S)); } catch {} }
@@ -195,6 +205,48 @@ async function srcUPC(code) {
   return { category, format, title, creator: category === 'game' ? '' : (it.brand || ''), publisher: it.brand || '',
     cover: it.images?.[0] || '', source: 'UPCitemdb', rawTitle: it.title };
 }
+// eBay listing titles are noisy ("Just Dance 3 Special Edition Game Nintendo Wii PAL With Manual (G4.6)").
+// Strip the seller noise from each, then keep the title that agrees most with the others.
+const LISTING_NOISE = /\b(pal|ntsc(-?[ujc])?|aus?|aust(ralian)?|uk|eu(ro)?|region ?free|with manual|w\/ ?manual|manual|inc(l|luding)?|complete|cib|boxed|tested|working|works|free (post(age)?|shipping)|fast (post|shipping)|video ?games?|games?|pre-?owned|used|brand new|new|sealed|factory sealed|disc only|disk only|vgc|exc(ellent)?|good|great|mint|condition|rare|htf|case|booklet|cover art|genuine|official|original|oz seller|aus seller|au stock|bundle|lot|retro|vintage|cd|dvd|blu-?ray|vhs|movie|film|region \d|r\d|\d{4})\b/gi;
+function cleanListing(t) {
+  let s = ' ' + t + ' ';
+  s = s.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ');
+  for (const [rx] of PLATFORM_RX) s = s.replace(new RegExp(rx.source, 'gi'), ' ');
+  s = s.replace(/\b(nintendo|sony|playstation|microsoft|sega)\b/gi, ' ').replace(LISTING_NOISE, ' ');
+  return s.replace(/\s+[-–|,:+\/]\s*(?=[-–|,:+\/]|$)/g, ' ').replace(/^[\s\-–|,:+\/]+|[\s\-–|,:+\/]+$/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+function consensusTitle(titles) {
+  const cands = titles.map(cleanListing).filter(t => t.length > 1);
+  if (!cands.length) return '';
+  let best = cands[0], bestScore = -1;
+  for (const a of cands) {
+    const score = cands.reduce((n, b) => n + dice(norm(a), norm(b)), 0) - a.length / 200; // prefer shorter on ties
+    if (score > bestScore) { best = a; bestScore = score; }
+  }
+  return best;
+}
+const majority = arr => { const m = new Map(); for (const x of arr.filter(Boolean)) m.set(x, (m.get(x) || 0) + 1); return [...m].sort((a, b) => b[1] - a[1])[0]?.[0] || null; };
+async function srcEbay(code) {
+  if (!proxy()) return null;
+  const r = await fetch(`${proxy()}/ebay?code=${code}&m=${S.ebayMarket}`);
+  if (r.status === 501 || r.status === 404) return null; // worker has no eBay keys yet
+  if (!r.ok) throw new Error('eBay ' + r.status);
+  const d = await r.json(), its = d.items || [];
+  if (!its.length) return null;
+  const blob = its.map(i => `${i.title} ${i.category}`).join(' ');
+  const cats = its.map(i => i.category || '');
+  const catOf = c => /video game/i.test(c) ? 'game' : /dvd|blu-?ray|vhs|movie|film|tv/i.test(c) ? 'movie' : /music|cd|record|vinyl|cassette/i.test(c) ? 'music' : /book|comic/i.test(c) ? 'book' : null;
+  const category = majority(cats.map(catOf)) || (majority(its.map(i => detectPlatform(i.title))) ? 'game' : 'other');
+  let format = '';
+  if (category === 'game') format = majority(its.map(i => detectPlatform(i.title))) || 'Other game';
+  else if (category === 'movie') format = /\b(4k|uhd)\b/i.test(blob) ? '4K UHD' : /blu-?ray/i.test(blob) ? 'Blu-ray' : /\bvhs\b/i.test(blob) ? 'VHS' : 'DVD';
+  else if (category === 'music') format = /vinyl|\blp\b|record/i.test(blob) ? 'Vinyl LP' : /cassette|tape/i.test(blob) ? 'Cassette' : 'CD';
+  const prices = its.filter(i => i.price != null && i.currency === its[0].currency).map(i => i.price).sort((a, b) => a - b);
+  const region = /\bpal\b/i.test(blob) ? 'PAL' : /\bntsc\b/i.test(blob) ? 'NTSC' : '';
+  return { category, format, title: consensusTitle(its.map(i => i.title)), cover: its.find(i => i.image)?.image || '', source: 'eBay',
+    country: region, rawTitle: its[0].title,
+    ebay: prices.length ? { n: its.length, low: prices[0], median: prices[Math.floor(prices.length / 2)], currency: its[0].currency, market: d.market } : null };
+}
 async function srcPC(code) {
   if (!proxy() || !S.pcToken) return null;
   const d = await getJSON(`${proxy()}/pc?code=${code}&t=${encodeURIComponent(S.pcToken)}`);
@@ -213,16 +265,20 @@ async function lookup(code, wantFormat) {
   if (isISBN(code) || wantCat === 'book') tasks.push(srcOpenLibrary(code));
   if (!wantCat || wantCat === 'music' || wantCat === 'movie') tasks.push(srcDiscogs(code, wantFormat), srcMB(code));
   if (wantCat !== 'music' && wantCat !== 'book') tasks.push(srcUPC(code), srcPC(code));
+  if (wantCat !== 'book' || !isISBN(code)) tasks.push(srcEbay(code)); // eBay also gives local prices for everything
   const settled = await Promise.allSettled(tasks);
   const got = settled.filter(s => s.status === 'fulfilled' && s.value).map(s => s.value);
   const errors = settled.filter(s => s.status === 'rejected').map(s => s.reason?.message || 'error');
   if (!got.length) return { found: false, errors };
   const by = n => got.find(g => g.source === n);
-  const pc = by('PriceCharting'), dg = by('Discogs'), mb = by('MusicBrainz'), up = by('UPCitemdb'), ol = by('Open Library');
-  let best = pc || dg || mb || ol || up;
+  const pc = by('PriceCharting'), dg = by('Discogs'), mb = by('MusicBrainz'), up = by('UPCitemdb'), ol = by('Open Library'), eb = by('eBay');
+  // UPCitemdb titles are cleaner than eBay's, but only if it agrees on what kind of thing this is
+  const upOK = up && up.category !== 'other' && (!eb || up.category === eb.category);
+  let best = pc || dg || mb || ol || (upOK ? up : null) || eb || up;
   best = { ...best };
   if (best.source === 'Discogs') { if (mb) { best.mbid = mb.mbid; best.rgid = mb.rgid; best.cover ||= mb.cover; } }
   if (pc && up) { best.cover ||= up.cover; best.publisher ||= up.publisher; }
+  if (eb) { best.ebay = eb.ebay; best.cover ||= eb.cover; if (best.category === 'game' && (!best.format || best.format === 'Other game')) best.format = eb.format; if (!best.country && eb.country) best.country = eb.country; }
   if (wantFormat && catOfFormat(wantFormat) === best.category) best.format = wantFormat;
   best.sources = got.map(g => g.source);
   return { found: true, cand: best, errors };
@@ -242,11 +298,13 @@ async function priceInfo(c) {
     }
   } catch {}
   if (c.price) out.pc = c.price;
+  if (c.ebay) out.ebay = c.ebay;
   return out;
 }
+const ebayFindUrl = code => `https://${ebayHost()}/sch/i.html?_nkw=${encodeURIComponent(code)}`;
 const priceLinks = (c, code) => {
-  const q = encodeURIComponent([c.creator, c.title, c.format].filter(Boolean).join(' ') || code);
-  const L = [[`https://www.ebay.com/sch/i.html?_nkw=${q}&LH_Sold=1&LH_Complete=1`, 'eBay sold']];
+  const q = encodeURIComponent([c.creator, c.title, c.category === 'game' ? c.format : ''].filter(Boolean).join(' ') || code);
+  const L = [[`https://${ebayHost()}/sch/i.html?_nkw=${q}&LH_Sold=1&LH_Complete=1`, 'eBay sold']];
   if (c.discogsId) L.push([`https://www.discogs.com/sell/release/${c.discogsId}`, 'Discogs market']);
   if (c.category === 'game' || c.category === 'movie' || !c.discogsId) L.push([`https://www.pricecharting.com/search-products?q=${encodeURIComponent(code || c.title)}&type=prices`, 'PriceCharting']);
   return L;
@@ -414,12 +472,13 @@ function renderVerdict({ code, cand, found, m, errors = [] }) {
   const html = `<div class="verdict ${kind}">
     <div class="tag">${tag}</div><h2>${esc(title)}</h2><div class="sub">${esc(sub)}</div>
     ${cand?.details ? `<div class="sub">${esc(cand.details)}</div>` : ''}
-    ${found === false && !m.exact.length ? `<div class="sub" style="margin-top:6px">${offline ? 'Offline: checked your collection only.' : 'No database knew this barcode' + (S.proxyUrl ? '' : ' (games, DVDs and VHS need the lookup proxy, see Settings)')}. You can still add it and name it.</div>` : ''}
+    ${found === false && !m.exact.length ? `<div class="sub" style="margin-top:6px">${offline ? 'Offline: checked your collection only.' : 'No database knew this barcode. Tap <b>Find on eBay</b> to see what it is, then add it and type the name once.'}</div>` : ''}
     ${others.length ? `<div class="matches">${others.map(it => itemRow(it, m.exact.includes(it) ? '' : `<div class="s">${m.variants.includes(it) ? 'Same release family, different pressing/edition' : 'Similar title'}</div>`)).join('')}</div>` : ''}
     <div class="prices" id="priceBox"></div>
     <div class="actions">
       <button class="btn primary" id="vNext">Scan next</button>
       ${m.exact.length ? `<button class="btn" id="vCopy">+1 copy</button>` : `<button class="btn" id="vAdd">Add to collection</button>`}
+      ${found === false && !m.exact.length ? `<a class="btn" href="${ebayFindUrl(code)}" target="_blank" rel="noopener">🔎 Find on eBay</a>` : ''}
     </div></div>`;
   $('#result').innerHTML = html;
   $('#result').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -437,6 +496,7 @@ async function showPrices(cand, code) {
   const parts = [];
   if (p.discogs?.low != null) parts.push(`This pressing: from <b>$${p.discogs.low.toFixed(2)}</b> (${p.discogs.n} for sale)`);
   if (p.master?.low != null) parts.push(`Any version: from <b>$${Number(p.master.low).toFixed(2)}</b> (${p.master.n} for sale)`);
+  if (p.ebay) parts.push(`eBay ${EBAY[p.ebay.market]?.[0] || ''} listings: typical <b>${money(p.ebay.median, p.ebay.currency)}</b>, from ${money(p.ebay.low, p.ebay.currency)} (${p.ebay.n})`);
   if (p.pc) parts.push(`Loose <b>$${p.pc.loose ?? '–'}</b> · Complete <b>$${p.pc.cib ?? '–'}</b> · New <b>$${p.pc.new ?? '–'}</b>`);
   if (document.body.contains(box)) box.innerHTML = (parts.length ? parts.join('<br>') : '') + `<div class="links">${links}</div>`;
 }
@@ -516,6 +576,7 @@ function openEditor(it) {
       <div class="full row">
         <button class="btn primary" type="submit" style="flex:1">Save</button>
         ${it.barcode ? `<button class="btn" type="button" id="edRelook">Look up again</button>` : ''}
+        ${it.barcode && it.needsInfo ? `<a class="btn" href="${ebayFindUrl(it.barcode)}" target="_blank" rel="noopener">🔎 eBay</a>` : ''}
         <button class="btn danger" type="button" id="edDel">Delete</button>
       </div>
     </form>`;
@@ -674,6 +735,9 @@ async function init() {
   $('#optBeep').checked = S.beep; $('#optAutoAdd').checked = S.autoAdd;
   $('#optBeep').onchange = e => { S.beep = e.target.checked; saveS(); };
   $('#optAutoAdd').onchange = e => { S.autoAdd = e.target.checked; saveS(); };
+  $('#ebayMarket').innerHTML = Object.entries(EBAY).map(([k, [n]]) => `<option value="${k}">${n}</option>`).join('');
+  $('#ebayMarket').value = S.ebayMarket;
+  $('#ebayMarket').onchange = e => { S.ebayMarket = e.target.value; saveS(); };
   $('#saveSettings').onclick = () => { S.discogsToken = $('#discogsToken').value.trim(); S.proxyUrl = $('#proxyUrl').value.trim(); S.pcToken = $('#pcToken').value.trim(); saveS(); toast('Saved'); };
   $('#testSources').onclick = testSources;
   $('#expJson').onclick = () => download(`stacks-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ app: 'stacks', v: 1, exported: new Date().toISOString(), items }, null, 1), 'application/json');
@@ -692,7 +756,8 @@ async function testSources() {
   const t = async (name, fn) => { try { const r = await fn(); return `${r ? '✅' : '⚠️'} ${name}${r ? ': ' + esc(r.title) : ': no result'}`; } catch (e) { return `❌ ${name}: ${esc(e.message)}`; } };
   const lines = await Promise.all([
     t('Discogs', () => srcDiscogs('602537479870')), t('MusicBrainz', () => srcMB('602537479870')), t('Open Library', () => srcOpenLibrary('9780140449136')),
-    S.proxyUrl ? t('UPC proxy', () => srcUPC('045496740224')) : 'ℹ️ UPC proxy not set', S.pcToken ? t('PriceCharting', () => srcPC('045496740224')) : 'ℹ️ PriceCharting not set',
+    S.proxyUrl ? t('UPC proxy', () => srcUPC('085391163329')) : 'ℹ️ UPC proxy not set',
+    S.proxyUrl ? (async () => { try { const h = await getJSON(`${proxy()}/health`); if (!h?.ebay) return '⚠️ eBay: keys not set on the worker (see README)'; return await t('eBay', () => srcEbay('3307215601594')); } catch (e) { return `❌ eBay: ${esc(e.message)}`; } })() : 'ℹ️ eBay needs the proxy', S.pcToken ? t('PriceCharting', () => srcPC('045496740224')) : 'ℹ️ PriceCharting not set',
   ]);
   out.innerHTML = lines.join('<br>');
 }

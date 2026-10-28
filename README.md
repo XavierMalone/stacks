@@ -27,9 +27,12 @@ You can also type a title in the scan box to search your own collection. That's 
 | MusicBrainz + Cover Art Archive | Music, cover art | No |
 | Open Library | Books (ISBN) | No |
 | UPCitemdb (through the proxy) | Games, DVD, Blu-ray, VHS, general products | No, 100 lookups/day free |
+| **eBay (through the proxy)** | **Everything, worldwide: games (incl. PAL/Australian), DVD, VHS, music.** Title, console, region and live local prices | Free developer key, 5,000 lookups/day |
 | PriceCharting (through the proxy) | Games UPC → exact title, console, loose/CIB/new prices | Paid subscription |
 
-There is no single free global database of every barcode. Games and movies are where free coverage is weakest, which is why the Inbox exists.
+There's no free "barcode database" that covers games well (UPCitemdb is mostly US). eBay is effectively the world's biggest one, because sellers list items by barcode. Stacks reads the listings for a barcode and takes the title most of them agree on, e.g. 4 messy listings → "Just Dance 3 Special Edition · Wii · PAL".
+
+**No setup?** Unknown barcodes get a **🔎 Find on eBay** button that opens eBay's barcode search, so you can see what it is and type the name once.
 
 ## Your data
 
@@ -43,13 +46,23 @@ Everything is stored on your phone (IndexedDB) and never leaves it. Use **Settin
 
 Netlify Drop or Cloudflare Pages also work: drag the folder in.
 
-### 2. (Optional) The lookup proxy, for games and movies, ~2 minutes
+### 2. The lookup proxy, for automatic game and movie lookups, ~10 minutes, all free
 
-1. Sign up free at dash.cloudflare.com → **Workers & Pages → Create → Worker**.
-2. Name it `stacks-proxy`, click **Deploy**, then **Edit code**. Paste in `proxy/worker.js` and **Deploy** again.
-3. Copy the `https://stacks-proxy.<you>.workers.dev` URL into Stacks **Settings → Lookup proxy URL**, then tap **Test sources**.
+**a) Get eBay keys** (lets the proxy search eBay)
+1. Go to developer.ebay.com → **Join**, and sign in with your normal eBay account.
+2. Open **Application Keys**, then create a **Production** keyset (call the app "Stacks").
+3. eBay will ask about *Marketplace account deletion notifications*. Choose the **exemption**: Stacks doesn't store any eBay user data.
+4. Copy the **App ID (Client ID)** and **Cert ID (Client Secret)**.
 
-The worker only forwards the two lookups above, so it can't be used as an open proxy.
+**b) Create the proxy**
+1. Sign up at dash.cloudflare.com, then go to **Workers & Pages → Create → Worker**. Name it `stacks-proxy` and click **Deploy**.
+2. Click **Edit code**, replace everything with `proxy/worker.js` from this repo, and click **Deploy**.
+3. Go to the worker's **Settings → Variables and Secrets → Add**. Add a *Secret* `EBAY_CLIENT_ID` (your App ID) and a *Secret* `EBAY_CLIENT_SECRET` (your Cert ID), then **Deploy**.
+
+**c) Connect Stacks**
+In Stacks → **Settings**, paste `https://stacks-proxy.<you>.workers.dev` into **Lookup proxy URL**, pick your **eBay country**, then tap **Save** and **Test sources**.
+
+The worker only forwards these specific lookups (it can't be used as an open proxy), and it caches answers for a day to save your free quota.
 
 ## Tips for a big collection
 

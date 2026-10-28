@@ -48,6 +48,7 @@ main{padding:0 16px;max-width:720px;margin:0 auto}
 .btn.primary{background:var(--accent);color:#0b1020}
 .btn.big{width:100%;padding:16px;font-size:17px}
 .btn.small{padding:8px 12px;font-size:14px}
+a.btn{text-decoration:none;color:var(--text);display:inline-flex;align-items:center;justify-content:center}
 .btn.danger{background:var(--own-bg);color:var(--own)}
 .fmtbar{display:flex;gap:8px;align-items:center;margin-top:10px;color:var(--muted);font-size:14px}
 .fmtbar select{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px}
@@ -179,8 +180,10 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
       <p><b>MusicBrainz</b>, <b>Discogs</b> and <b>Open Library</b> work out of the box with no keys.</p>
       <label for="discogsToken">Discogs personal token (optional: higher rate limit and cover art)</label>
       <input type="password" id="discogsToken" placeholder="from discogs.com/settings/developers">
-      <label for="proxyUrl">Lookup proxy URL (optional: unlocks game, DVD and VHS barcodes)</label>
+      <label for="proxyUrl">Lookup proxy URL (unlocks games, DVDs and VHS via eBay + UPCitemdb)</label>
       <input type="url" id="proxyUrl" placeholder="https://stacks-proxy.yourname.workers.dev">
+      <label for="ebayMarket">eBay country (for identifying items and local prices)</label>
+      <select id="ebayMarket" style="width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px"></select>
       <label for="pcToken">PriceCharting API token (optional: needs proxy; adds game prices)</label>
       <input type="password" id="pcToken" placeholder="paid PriceCharting subscription">
       <p style="margin-top:12px">Setup for the proxy is in <code>README.md</code>. It's a free 2-minute Cloudflare Worker.</p>
