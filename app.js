@@ -198,10 +198,26 @@ const discogsHeaders = () => S.discogsToken ? { Authorization: `Discogs token=${
 
 async function srcDiscogs(code, wantFormat) {
   const d = await getJSON(`https://api.discogs.com/database/search?barcode=${code}&type=release&per_page=25`, { headers: discogsHeaders() });
-  let rs = d?.results || [];
+  const rs = d?.results || [];
   if (!rs.length) return null;
-  if (wantFormat) { const pref = rs.filter(r => discogsFormat(r.formats) === wantFormat); if (pref.length) rs = pref; }
-  const r = rs[0], [artist, ...rest] = r.title.split(' - ');
+  return discogsCand(pickPressing(rs, wantFormat));
+}
+// Several pressings often share one barcode, listed in no useful order. Pick the one collectors own most,
+// nudged towards your scan format and your country, and away from bootlegs.
+const MARKET_COUNTRIES = { EBAY_AU: /australia|australasia|new zealand/i, EBAY_GB: /^uk$|united kingdom/i, EBAY_US: /^us$/i, EBAY_CA: /canada/i,
+  EBAY_IE: /ireland|^uk$|europe/i, EBAY_DE: /germany|europe/i, EBAY_FR: /france|europe/i, EBAY_IT: /italy|europe/i, EBAY_ES: /spain|europe/i, EBAY_NL: /netherlands|europe|benelux/i };
+function pressingScore(r, wantFormat) {
+  const have = r.community?.have ?? r.stats?.community?.in_collection ?? 0;
+  const fmtText = [...(r.format || []), r.format].join(' ');
+  let s = have;
+  if (/unofficial/i.test(fmtText)) s -= 1e6;
+  if (wantFormat && discogsFormat(r.formats || [{ name: (r.major_formats || [])[0] || String(r.format || '').split(',')[0] }]) === wantFormat) s += 1e5;
+  if (MARKET_COUNTRIES[S.ebayMarket]?.test(r.country || '')) s += Math.max(50, have * 0.5);
+  return s;
+}
+const pickPressing = (rs, wantFormat) => rs.reduce((best, r) => pressingScore(r, wantFormat) > pressingScore(best, wantFormat) ? r : best, rs[0]);
+function discogsCand(r) {
+  const [artist, ...rest] = r.title.split(' - ');
   return {
     category: 'music', title: rest.join(' - ') || r.title, creator: rest.length ? artist.replace(/\s\(\d+\)$/, '') : '',
     format: discogsFormat(r.formats), year: r.year || '', country: r.country || '', publisher: (r.label || [])[0] || '',
@@ -423,7 +439,7 @@ function validCode(code) {
   return (10 - (sum % 10)) % 10 === chk;
 }
 
-let stream = null, video = null, scanning = false, paused = false, busy = false, lastCode = '', lastAt = 0;
+let stream = null, video = null, scanning = false, paused = false, busy = false, lastCode = '', lastAt = 0; // lastCode: most recent accepted scan
 async function startCamera() {
   const host = $('#reader'); host.classList.remove('idle');
   host.innerHTML = `<video playsinline muted autoplay></video><div class="guide"></div>
@@ -465,11 +481,20 @@ async function scanLoop() {
 }
 function pauseScanner() { paused = true; }
 function resumeScanner() { paused = false; }
-function onDecoded(text) {
+// The camera sees each barcode ~10×/sec, sometimes as a 12-digit UPC and sometimes as the same 13-digit EAN.
+// So: compare canonical codes, require two matching reads (filters rare misreads), and ignore a barcode for as
+// long as it stays in view (plus a few seconds after), so holding it there never adds it twice.
+const seenCodes = new Map(); // canonical code -> last time the camera saw it
+let pendingCode = '', pendingAt = 0;
+function onDecoded(text, confirmed = false) {
   const code = String(text).replace(/\D/g, '');
   if (code.length < 6 || !validCode(code) || paused) return;
-  if (code === lastCode && Date.now() - lastAt < 4000) return;
-  lastCode = code; lastAt = Date.now();
+  const c = canon(code), now = Date.now();
+  const seen = seenCodes.get(c);
+  if (seen && now - seen < 5000) { seenCodes.set(c, now); return; }
+  if (!confirmed && (pendingCode !== c || now - pendingAt > 1500)) { pendingCode = c; pendingAt = now; return; }
+  pendingCode = ''; seenCodes.set(c, now);
+  lastCode = code; lastAt = now;
   handleCode(code);
 }
 // iPhone stills are autofocused and full resolution, so a photo decodes even when live video won't.
@@ -479,7 +504,7 @@ async function decodePhoto(file) {
     const bmp = await createImageBitmap(file);
     const codes = await (await getDecoder())(toCanvas(bmp));
     if (!codes.length) return toast('No barcode found. Try closer and in focus');
-    lastCode = ''; paused = false; onDecoded(codes[0]);
+    seenCodes.delete(canon(codes[0])); paused = false; onDecoded(codes[0], true);
   } catch (e) { toast('Could not read photo'); }
 }
 document.addEventListener('visibilitychange', () => {
@@ -559,11 +584,13 @@ function newItem(code, cand) {
 
 // Catalogue mode: never block the camera. Lookups queue up and run one after another.
 let queue = Promise.resolve(), pending = 0;
+const adding = new Set(); // canonical codes being saved right now, so a second read can't slip past before the first save lands
 function catalogue(code) {
+  if (adding.has(canon(code))) return;
   const ex = findMatches(null, code).exact;
   if (ex.length) { beep('own'); toast(`Already have: ${ex[0].title || code}`); renderVerdict({ code, cand: ex[0], m: { exact: ex, variants: [], similar: [] } }); return; }
   const it = newItem(code, null); it.title = ''; it.needsInfo = true; it.looking = true;
-  saveItem(it); beep('add'); pending++; renderQueue();
+  adding.add(canon(code)); saveItem(it).finally(() => adding.delete(canon(code))); beep('add'); pending++; renderQueue();
   queue = queue.then(async () => {
     try {
       const r = await lookup(code, S.format);
@@ -620,6 +647,7 @@ function openEditor(it) {
       <div class="full sub" style="color:var(--muted);font-size:12px">${esc([it.details, it.source && 'Source: ' + it.source, it.discogsId && 'Discogs #' + it.discogsId].filter(Boolean).join(' · '))}</div>
       <div class="full row">
         <button class="btn primary" type="submit" style="flex:1">Save</button>
+        ${it.category === 'music' ? `<button class="btn" type="button" id="edVersion">Change version</button>` : ''}
         ${it.barcode ? `<button class="btn" type="button" id="edRelook">Look up again</button>` : ''}
         ${it.barcode && it.needsInfo ? `<a class="btn" href="${ebayFindUrl(it.barcode)}" target="_blank" rel="noopener">🔎 eBay</a>` : ''}
         <button class="btn danger" type="button" id="edDel">Delete</button>
@@ -636,6 +664,8 @@ function openEditor(it) {
     await saveItem(it); closeSheet(); toast('Saved'); renderAll();
   };
   sheet.querySelector('#edDel').onclick = async () => { if (confirm(`Delete “${it.title || it.barcode}”?`)) { await removeItem(it.id); closeSheet(); toast('Deleted'); renderAll(); } };
+  const vb = sheet.querySelector('#edVersion');
+  if (vb) vb.onclick = () => openVersions(it);
   const rl = sheet.querySelector('#edRelook');
   if (rl) rl.onclick = async () => {
     rl.innerHTML = '<span class="spinner"></span>…';
@@ -645,6 +675,49 @@ function openEditor(it) {
     await saveItem(it); openEditor(it); renderAll();
   };
   $('#sheetBg').classList.add('on'); sheet.classList.add('on');
+}
+// ---------- version picker (Discogs) ----------
+async function openVersions(it) {
+  const sheet = $('#sheet');
+  sheet.innerHTML = `<h2>Which version do you have?</h2><div class="sub" style="color:var(--muted);font-size:14px;margin:-6px 0 10px">${esc([it.creator, it.title].filter(Boolean).join(' – '))}</div>
+    <div id="verList"><span class="spinner"></span>Loading versions…</div><div class="row" style="margin-top:12px"><button class="btn" id="verBack">Back</button></div>`;
+  sheet.querySelector('#verBack').onclick = () => openEditor(it);
+  $('#sheetBg').classList.add('on'); sheet.classList.add('on'); sheet.scrollTop = 0;
+  const H = { headers: discogsHeaders() };
+  try {
+    const same = it.barcode ? (await getJSON(`https://api.discogs.com/database/search?barcode=${it.barcode.replace(/\D/g, '')}&type=release&per_page=50`, H))?.results || [] : [];
+    let masterId = it.masterId?.startsWith('d') ? it.masterId.slice(1) : same.find(r => r.master_id)?.master_id;
+    if (!masterId && !same.length) {
+      const q = encodeURIComponent(`${it.creator} ${it.title}`.trim());
+      masterId = (await getJSON(`https://api.discogs.com/database/search?q=${q}&type=master&per_page=1`, H))?.results?.[0]?.id;
+    }
+    const others = masterId ? ((await getJSON(`https://api.discogs.com/masters/${masterId}/versions?per_page=100&sort=released`, H))?.versions || [])
+      .filter(v => !same.some(s => s.id === v.id)) : [];
+    const row = (id, fmt, country, year, label, catno, have) => `<button class="item" data-rel="${id}"${id === it.discogsId ? ' style="outline:2px solid var(--accent)"' : ''}>
+      <div class="meta"><div class="t">${esc(fmt)}</div><div class="s">${esc([country, year, label, catno].filter(Boolean).join(' · '))}${have ? ` · ${have.toLocaleString()} own this` : ''}${id === it.discogsId ? ' · current' : ''}</div></div></button>`;
+    const sameRows = same.sort((a, b) => pressingScore(b, it.format) - pressingScore(a, it.format))
+      .map(r => row(r.id, (r.format || []).join(', '), r.country, r.year, (r.label || [])[0], r.catno, r.community?.have));
+    const otherRows = others.map(v => row(v.id, [...(v.major_formats || []), v.format].filter(Boolean).join(', '), v.country, (v.released || '').slice(0, 4), v.label, v.catno, v.stats?.community?.in_collection));
+    sheet.querySelector('#verList').innerHTML = (sameRows.length ? `<h3 style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Same barcode</h3><div class="list">${sameRows.join('')}</div>` : '')
+      + (otherRows.length ? `<h3 style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Other versions of this album (${otherRows.length})</h3><div class="list">${otherRows.join('')}</div>` : '')
+      || '<div class="empty">Discogs has no versions for this item.</div>';
+    sheet.querySelectorAll('[data-rel]').forEach(b => b.onclick = () => applyRelease(it, +b.dataset.rel, b));
+  } catch (e) { sheet.querySelector('#verList').innerHTML = `<div class="empty">Couldn't load versions (${esc(e.message)}).</div>`; }
+}
+async function applyRelease(it, id, btn) {
+  btn.querySelector('.t').insertAdjacentHTML('afterbegin', '<span class="spinner"></span>');
+  try {
+    const r = await getJSON(`https://api.discogs.com/releases/${id}`, { headers: discogsHeaders() });
+    const creator = (r.artists || []).map(a => a.name.replace(/\s\(\d+\)$/, '') + (a.join ? ` ${a.join} ` : '')).join('').replace(/\s+/g, ' ').trim();
+    Object.assign(it, {
+      title: r.title, creator: creator || it.creator, category: 'music', format: discogsFormat(r.formats) || it.format,
+      year: r.year ? String(r.year) : '', country: r.country || '', publisher: r.labels?.[0]?.name || '',
+      discogsId: r.id, masterId: r.master_id ? 'd' + r.master_id : it.masterId,
+      details: (r.formats || []).map(f => [f.name, ...(f.descriptions || []), f.text].filter(Boolean).join(', ')).join(' + '),
+      cover: r.images?.[0]?.uri150 || r.images?.[0]?.uri || it.cover, source: 'Discogs (picked)', needsInfo: false,
+    });
+    await saveItem(it); toast('Version updated'); openEditor(it); renderAll();
+  } catch (e) { toast(`Couldn't load that version`); btn.querySelector('.spinner')?.remove(); }
 }
 function closeSheet() { $('#sheet').classList.remove('on'); $('#sheetBg').classList.remove('on'); }
 
