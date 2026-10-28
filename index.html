@@ -36,8 +36,12 @@ main{padding:0 16px;max-width:720px;margin:0 auto}
 
 /* scanner */
 #reader{width:100%;aspect-ratio:4/3;background:#000;border-radius:var(--radius);overflow:hidden;position:relative}
-#reader video{object-fit:cover!important;width:100%!important;height:100%!important}
+#reader video{object-fit:cover;width:100%;height:100%;display:block}
 #reader.idle{display:grid;place-items:center}
+#reader .guide{position:absolute;left:5%;right:5%;top:25%;bottom:25%;border:3px solid #fff;border-radius:12px;box-shadow:0 0 0 999px #0006;pointer-events:none}
+#reader .camtools{position:absolute;top:10px;right:10px;display:flex;gap:6px}
+#reader .camtools .btn{background:#000a;color:#fff}
+#reader .camhint{position:absolute;bottom:8px;left:0;right:0;text-align:center;font-size:13px;color:#fffc;text-shadow:0 1px 2px #000}
 .scanrow{display:flex;gap:8px;margin-top:10px}
 .scanrow input{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .btn{border:0;border-radius:12px;padding:12px 16px;background:var(--panel2);font-weight:600}
@@ -124,8 +128,9 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
     </div>
     <div id="reader" class="idle"><button class="btn primary" id="camBtn">Start camera</button></div>
     <div class="scanrow">
-      <input id="manualCode" inputmode="numeric" placeholder="…or type a barcode / search a title" autocomplete="off">
+      <input id="manualCode" inputmode="numeric" placeholder="Barcode or title…" autocomplete="off">
       <button class="btn" id="manualGo">Go</button>
+      <label class="btn" title="Scan from a photo">📷<input type="file" id="photoIn" accept="image/*" capture="environment" hidden></label>
     </div>
     <div class="fmtbar" id="fmtBar">
       <span>Format:</span>
@@ -206,7 +211,7 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
 <div class="toast" id="toast"></div>
 <div class="flash" id="flash"></div>
 
-<script src="vendor/html5-qrcode.min.js"></script>
+<script src="vendor/zxing-reader.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

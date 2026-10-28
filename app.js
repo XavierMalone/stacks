@@ -282,28 +282,107 @@ function fillFormatSelect(sel, value, withAuto) {
 }
 
 // ---------- scanner ----------
-let scanner = null, scanning = false, lastCode = '', lastAt = 0, paused = false;
+// Native BarcodeDetector where it exists (Android Chrome); otherwise zxing-cpp compiled to WebAssembly,
+// which is far better at 1D product barcodes than pure-JS decoders (this is what iPhones use).
+let decoder = null;
+async function getDecoder() {
+  if (decoder) return decoder;
+  if ('BarcodeDetector' in window) {
+    try {
+      const fm = await BarcodeDetector.getSupportedFormats();
+      if (fm.includes('ean_13')) {
+        const bd = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'].filter(f => fm.includes(f)) });
+        return decoder = async src => (await bd.detect(src)).map(r => r.rawValue);
+      }
+    } catch {}
+  }
+  ZXingWASM.prepareZXingModule({ overrides: { locateFile: (p, pre) => p.endsWith('.wasm') ? new URL('vendor/zxing_reader.wasm', location.href).href : pre + p }, fireImmediately: true });
+  const opts = { formats: ['EAN13', 'EAN8', 'UPCA', 'UPCE', 'Code128'], tryHarder: true, tryRotate: true }; // note: maxNumberOfSymbols:1 suppresses 1D results in zxing-cpp
+  return decoder = async src => {
+    const c = src instanceof HTMLCanvasElement ? src : toCanvas(src);
+    const img = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
+    return (await ZXingWASM.readBarcodes(img, opts)).filter(r => r.isValid).map(r => r.text);
+  };
+}
+function toCanvas(src, crop) {
+  const w = src.videoWidth || src.width, h = src.videoHeight || src.height;
+  const [sx, sy, sw, sh] = crop || [0, 0, w, h];
+  const scale = Math.min(1, 1600 / sw);
+  const c = document.createElement('canvas'); c.width = Math.round(sw * scale); c.height = Math.round(sh * scale);
+  c.getContext('2d', { willReadFrequently: true }).drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  return c;
+}
+// EAN/UPC check digit, so a misread never reaches the lookup
+function validCode(code) {
+  if (![8, 12, 13].includes(code.length)) return code.length >= 6; // Code 128 etc: accept as-is
+  const d = code.split('').map(Number), chk = d.pop();
+  const sum = d.reverse().reduce((a, n, i) => a + n * (i % 2 === 0 ? 3 : 1), 0);
+  return (10 - (sum % 10)) % 10 === chk;
+}
+
+let stream = null, video = null, scanning = false, paused = false, busy = false, lastCode = '', lastAt = 0;
 async function startCamera() {
-  const host = $('#reader'); host.classList.remove('idle'); host.innerHTML = '';
-  const F = Html5QrcodeSupportedFormats;
-  scanner = new Html5Qrcode('reader', { formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39], useBarCodeDetectorIfSupported: true, verbose: false });
+  const host = $('#reader'); host.classList.remove('idle');
+  host.innerHTML = `<video playsinline muted autoplay></video><div class="guide"></div>
+    <div class="camtools"><button class="btn small" id="torchBtn" hidden>🔦</button><button class="btn small" id="zoomBtn" hidden>2×</button></div>
+    <div class="camhint">Hold steady, a hand-span away · blurry? use 📷</div>`;
+  video = host.querySelector('video');
   try {
-    await scanner.start({ facingMode: 'environment' }, { fps: 12, qrbox: (w, h) => ({ width: Math.floor(w * .85), height: Math.floor(h * .45) }), aspectRatio: 4 / 3 }, onDecoded, () => {});
-    scanning = true;
+    getDecoder();
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+      facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: 'continuous' }] } });
+    video.srcObject = stream; await video.play();
+    scanning = true; paused = false;
+    setupCamTools(stream.getVideoTracks()[0]);
+    scanLoop();
   } catch (e) {
-    host.classList.add('idle'); host.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted)">Camera unavailable (${esc(e?.message || e)}).<br>Type the barcode below instead.<br><br><button class="btn primary" id="camBtn">Try again</button></div>`;
+    host.classList.add('idle'); host.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted)">Camera unavailable (${esc(e?.message || e)}).<br>Use 📷 Photo or type the barcode instead.<br><br><button class="btn primary" id="camBtn">Try again</button></div>`;
     $('#camBtn').onclick = startCamera;
   }
 }
-function pauseScanner() { if (scanning && !paused) { try { scanner.pause(true); paused = true; } catch {} } }
-function resumeScanner() { if (scanning && paused) { try { scanner.resume(); paused = false; } catch {} } }
+function setupCamTools(track) {
+  const caps = track.getCapabilities?.() || {};
+  if (caps.torch) { const b = $('#torchBtn'); b.hidden = false; let on = false; b.onclick = () => { on = !on; track.applyConstraints({ advanced: [{ torch: on }] }).catch(() => {}); b.classList.toggle('primary', on); }; }
+  if (caps.zoom && caps.zoom.max >= 2) { const b = $('#zoomBtn'); b.hidden = false; let z = 1; b.onclick = () => { z = z === 1 ? 2 : 1; track.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {}); b.textContent = z === 1 ? '2×' : '1×'; }; }
+}
+async function scanLoop() {
+  if (!scanning) return;
+  if (!paused && !busy && video.readyState >= 2 && !document.hidden) {
+    busy = true;
+    try {
+      // map the on-screen guide box back to video pixels (the video is object-fit: cover), with some slack
+      const vw = video.videoWidth, vh = video.videoHeight, cw = video.clientWidth, ch = video.clientHeight;
+      const s = Math.max(cw / vw, ch / vh), visW = cw / s, visH = ch / s, x0 = (vw - visW) / 2, y0 = (vh - visH) / 2;
+      const codes = await (await getDecoder())(toCanvas(video, [x0, y0 + visH * .15, visW, visH * .7]));
+      for (const c of codes) onDecoded(c);
+    } catch {}
+    busy = false;
+  }
+  setTimeout(() => requestAnimationFrame(scanLoop), 90);
+}
+function pauseScanner() { paused = true; }
+function resumeScanner() { paused = false; }
 function onDecoded(text) {
   const code = String(text).replace(/\D/g, '');
-  if (code.length < 8) return;
+  if (code.length < 6 || !validCode(code) || paused) return;
   if (code === lastCode && Date.now() - lastAt < 4000) return;
   lastCode = code; lastAt = Date.now();
   handleCode(code);
 }
+// iPhone stills are autofocused and full resolution, so a photo decodes even when live video won't.
+async function decodePhoto(file) {
+  toast('Reading photo…');
+  try {
+    const bmp = await createImageBitmap(file);
+    const codes = await (await getDecoder())(toCanvas(bmp));
+    if (!codes.length) return toast('No barcode found. Try closer and in focus');
+    lastCode = ''; paused = false; onDecoded(codes[0]);
+  } catch (e) { toast('Could not read photo'); }
+}
+document.addEventListener('visibilitychange', () => {
+  // iOS ends the camera when the app is backgrounded; bring it back on return
+  if (!document.hidden && scanning && stream && stream.getVideoTracks().every(t => t.readyState === 'ended')) startCamera();
+});
 
 // ---------- scan handling ----------
 const recent = []; // session scan history
@@ -582,6 +661,7 @@ async function init() {
   fillFormatSelect($('#fmtSelect'), S.format, true);
   $('#fmtSelect').onchange = e => { S.format = e.target.value; saveS(); };
   $('#camBtn').onclick = startCamera;
+  $('#photoIn').onchange = e => { if (e.target.files[0]) decodePhoto(e.target.files[0]); e.target.value = ''; };
   $('#manualGo').onclick = manualGo;
   $('#manualCode').onkeydown = e => { if (e.key === 'Enter') manualGo(); };
   document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => setView(b.dataset.v));
