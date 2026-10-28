@@ -119,7 +119,7 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
 </style>
 </head>
 <body>
-<header class="top"><h1>Stacks</h1><span class="count" id="hdrCount"></span></header>
+<header class="top"><h1>Stacks</h1><span class="count"><span id="syncBadge"></span> <span id="hdrCount"></span></span></header>
 <main>
   <!-- SCAN -->
   <section class="view on" id="v-scan">
@@ -163,8 +163,24 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
   <!-- SETTINGS -->
   <section class="view" id="v-set">
     <div class="card">
-      <h3>Backup &amp; sync</h3>
-      <p>Your collection lives on this device and works offline. Export a backup now and then, or import one on another device.</p>
+      <h3>Your Stacks server</h3>
+      <p>Your own free Cloudflare worker. It identifies games and movies through eBay, and keeps a cloud copy of your collection, so it survives a lost phone and shows up on every device. Scanning still works offline; changes sync when you're back online. Setup is in the README.</p>
+      <label for="proxyUrl">Server URL</label>
+      <input type="url" id="proxyUrl" placeholder="https://stacks-proxy.yourname.workers.dev">
+      <label for="ebayMarket">eBay country (for identifying items and local prices)</label>
+      <select id="ebayMarket" style="width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px"></select>
+      <label for="syncKey">Sync key (the same on every device; keep it secret)</label>
+      <input type="password" id="syncKey" placeholder="paste, or generate a new one" autocomplete="off">
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="syncNow">Connect &amp; sync now</button>
+        <button class="btn" id="genKey">Generate key</button>
+        <button class="btn" id="copyKey">Copy</button>
+      </div>
+      <p id="syncStatus" style="margin-bottom:0"></p>
+    </div>
+    <div class="card">
+      <h3>Backup files</h3>
+      <p>Export a backup file now and then, or import one on another device.</p>
       <div class="row">
         <button class="btn" id="expJson">Export backup (.json)</button>
         <label class="btn" style="margin:0">Import backup / CSV<input type="file" id="impFile" accept=".json,.csv" hidden></label>
@@ -180,14 +196,9 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
       <p><b>MusicBrainz</b>, <b>Discogs</b> and <b>Open Library</b> work out of the box with no keys.</p>
       <label for="discogsToken">Discogs personal token (optional: higher rate limit and cover art)</label>
       <input type="password" id="discogsToken" placeholder="from discogs.com/settings/developers">
-      <label for="proxyUrl">Lookup proxy URL (unlocks games, DVDs and VHS via eBay + UPCitemdb)</label>
-      <input type="url" id="proxyUrl" placeholder="https://stacks-proxy.yourname.workers.dev">
-      <label for="ebayMarket">eBay country (for identifying items and local prices)</label>
-      <select id="ebayMarket" style="width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px"></select>
-      <label for="pcToken">PriceCharting API token (optional: needs proxy; adds game prices)</label>
+      <label for="pcToken">PriceCharting API token (optional: needs your server; adds game prices)</label>
       <input type="password" id="pcToken" placeholder="paid PriceCharting subscription">
-      <p style="margin-top:12px">Setup for the proxy is in <code>README.md</code>. It's a free 2-minute Cloudflare Worker.</p>
-      <div class="row"><button class="btn primary" id="saveSettings">Save</button><button class="btn" id="testSources">Test sources</button></div>
+      <div class="row" style="margin-top:12px"><button class="btn primary" id="saveSettings">Save</button><button class="btn" id="testSources">Test sources</button></div>
       <div id="testOut" class="prices"></div>
     </div>
     <div class="card">
@@ -197,7 +208,7 @@ nav.tabs .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--
     </div>
     <div class="card">
       <h3>Danger zone</h3>
-      <button class="btn danger" id="wipe">Delete entire collection on this device</button>
+      <button class="btn danger" id="wipe">Clear the collection from this device</button>
     </div>
   </section>
 </main>

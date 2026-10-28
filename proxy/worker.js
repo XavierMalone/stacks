@@ -4,6 +4,8 @@
 //   GET /upc?code=<barcode>                -> UPCitemdb trial lookup (100/day, no key)
 //   GET /ebay?code=<barcode>&m=EBAY_AU     -> eBay Browse API listings for that barcode (free key, see README)
 //   GET /pc?code=<barcode>&t=<token>       -> PriceCharting product by UPC (paid token)
+//   GET  /sync?since=<ms>                  -> collection changes since then   } cloud copy of your collection,
+//   POST /sync  {items:[...]}              -> save changes (newest edit wins) } needs SYNC_KEY + a D1 binding "DB"
 // eBay needs two Worker secrets: EBAY_CLIENT_ID and EBAY_CLIENT_SECRET (Settings → Variables and Secrets).
 const MARKETS = ['EBAY_AU', 'EBAY_US', 'EBAY_GB', 'EBAY_CA', 'EBAY_IE', 'EBAY_DE', 'EBAY_FR', 'EBAY_IT', 'EBAY_ES', 'EBAY_NL'];
 
@@ -12,7 +14,8 @@ export default {
     const u = new URL(req.url);
     const code = (u.searchParams.get('code') || '').replace(/\D/g, '');
     if (req.method === 'OPTIONS') return out('', 204);
-    if (u.pathname === '/health') return out({ ok: true, ebay: !!(env.EBAY_CLIENT_ID && env.EBAY_CLIENT_SECRET) });
+    if (u.pathname === '/health') return out({ ok: true, ebay: !!(env.EBAY_CLIENT_ID && env.EBAY_CLIENT_SECRET), sync: !!(env.DB && env.SYNC_KEY) });
+    if (u.pathname === '/sync') return sync(req, env, u);
     if (code.length < 8 || code.length > 14) return out({ error: 'bad code' }, 400);
 
     // cache every answer for a day: saves free quota when the same item is scanned again
@@ -79,9 +82,32 @@ async function ebay(env, code, market) {
   return { market, items: [] };
 }
 
+// One row per item. `seq` is the server's own clock, so devices with wrong clocks still pull every change.
+async function sync(req, env, u) {
+  if (!env.DB || !env.SYNC_KEY) return out({ error: 'sync not set up on the worker' }, 501);
+  if (req.headers.get('Authorization') !== `Bearer ${env.SYNC_KEY}`) return out({ error: 'wrong sync key' }, 401);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated INTEGER NOT NULL, seq INTEGER NOT NULL)`).run();
+
+  if (req.method === 'POST') {
+    const { items = [] } = await req.json();
+    if (!Array.isArray(items) || items.length > 500) return out({ error: 'send 1-500 items per request' }, 400);
+    const now = Date.now() * 1000; // room for a per-item counter within the same millisecond
+    const stmts = items.filter(i => i && typeof i.id === 'string' && i.id.length < 64).map((i, n) => env.DB.prepare(
+      `INSERT INTO items (id, data, updated, seq) VALUES (?1, ?2, ?3, ?4)
+       ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated = excluded.updated, seq = excluded.seq WHERE excluded.updated > items.updated`
+    ).bind(i.id, JSON.stringify(i), +i.updatedAt || 0, now + n));
+    if (stmts.length) await env.DB.batch(stmts);
+    return out({ ok: true, saved: stmts.length });
+  }
+
+  const since = +u.searchParams.get('since') || 0;
+  const { results } = await env.DB.prepare(`SELECT data, seq FROM items WHERE seq > ?1 ORDER BY seq LIMIT 2000`).bind(since).all();
+  return out({ items: results.map(r => JSON.parse(r.data)), next: results.length ? results[results.length - 1].seq : since, more: results.length === 2000 });
+}
+
 function out(body, status = 200) {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, OPTIONS' },
+    headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'Authorization, Content-Type' },
   });
 }

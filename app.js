@@ -63,7 +63,8 @@ const ebayHost = () => EBAY[S.ebayMarket]?.[1] || 'www.ebay.com';
 const money = (v, cur) => v == null ? '–' : new Intl.NumberFormat(navigator.language || 'en', { style: 'currency', currency: cur || 'USD', maximumFractionDigits: 2 }).format(v);
 
 // ---------- settings ----------
-const S = Object.assign({ discogsToken: '', proxyUrl: '', pcToken: '', beep: true, autoAdd: true, mode: 'check', format: '', ebayMarket: guessMarket() },
+const S = Object.assign({ discogsToken: '', proxyUrl: '', pcToken: '', beep: true, autoAdd: true, mode: 'check', format: '', ebayMarket: guessMarket(),
+  syncKey: '', lastPull: 0, lastPush: 0, lastSyncAt: 0 },
   safeJSON(lsGet('stacks.settings')) || {});
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function saveS() { try { localStorage.setItem('stacks.settings', JSON.stringify(S)); } catch {} }
@@ -93,8 +94,52 @@ const DB = {
   },
 };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-async function saveItem(it) { it.updatedAt = Date.now(); await DB.put(it); const i = items.findIndex(x => x.id === it.id); i >= 0 ? items[i] = it : items.unshift(it); refreshCounts(); }
-async function removeItem(id) { await DB.del(id); items = items.filter(x => x.id !== id); refreshCounts(); }
+const loadItems = async () => (await DB.all()).filter(i => !i.deleted);
+async function saveItem(it) { it.updatedAt = Date.now(); await DB.put(it); const i = items.findIndex(x => x.id === it.id); i >= 0 ? items[i] = it : items.unshift(it); refreshCounts(); scheduleSync(); }
+// deletes leave a tombstone so other devices learn about them too
+async function removeItem(id) { await DB.put({ id, deleted: true, updatedAt: Date.now() }); items = items.filter(x => x.id !== id); refreshCounts(); scheduleSync(); }
+
+// ---------- cloud sync (optional, via the worker's D1 database) ----------
+// The phone stays the working copy (instant + offline); changes are pushed and pulled in the background.
+let syncing = false, syncAgain = false, syncTimer = null, syncState = '';
+const syncOn = () => !!(proxy() && S.syncKey);
+function scheduleSync(ms = 2500) { if (!syncOn()) return; clearTimeout(syncTimer); syncTimer = setTimeout(runSync, ms); }
+async function runSync() {
+  if (!syncOn() || !navigator.onLine) return setSync(syncOn() ? 'offline' : '');
+  if (syncing) { syncAgain = true; return; }
+  syncing = true; setSync('syncing');
+  const H = { Authorization: `Bearer ${S.syncKey}`, 'Content-Type': 'application/json' };
+  const call = async (url, opt) => { const r = await fetch(url, { ...opt, headers: H }); if (r.status === 401) throw new Error('wrong sync key'); if (r.status === 501) throw new Error('sync not set up on the worker'); if (!r.ok) throw new Error('server ' + r.status); return r.json(); };
+  try {
+    const all = await DB.all(), byId = new Map(all.map(i => [i.id, i]));
+    const dirty = all.filter(i => (i.updatedAt || 0) > S.lastPush && !i.looking);
+    for (let k = 0; k < dirty.length; k += 400)
+      await call(`${proxy()}/sync`, { method: 'POST', body: JSON.stringify({ items: dirty.slice(k, k + 400) }) });
+    if (dirty.length) S.lastPush = dirty.reduce((m, i) => Math.max(m, i.updatedAt || 0), S.lastPush);
+    let changed = 0, more = true;
+    while (more) {
+      const d = await call(`${proxy()}/sync?since=${S.lastPull}`);
+      for (const it of d.items) {
+        const local = byId.get(it.id);
+        if (!local || (it.updatedAt || 0) > (local.updatedAt || 0)) { await DB.put(it); changed++; }
+      }
+      S.lastPull = d.next; more = d.more;
+    }
+    S.lastSyncAt = Date.now(); saveS();
+    if (changed) { items = await loadItems(); renderAll(); }
+    setSync('ok');
+  } catch (e) { setSync('error', e.message); }
+  syncing = false;
+  if (syncAgain) { syncAgain = false; scheduleSync(500); }
+}
+function setSync(state, msg = '') {
+  syncState = state;
+  const label = { syncing: '☁︎ syncing…', ok: '☁︎ synced', offline: '☁︎ offline', error: '☁︎ sync error' }[state] || '';
+  const el = $('#syncBadge'); if (el) { el.textContent = label; el.title = msg; el.style.color = state === 'error' ? 'var(--own)' : ''; }
+  const st = $('#syncStatus');
+  if (st) st.textContent = !syncOn() ? 'Not connected.' : state === 'error' ? `Problem: ${msg}` : state === 'syncing' ? 'Syncing…'
+    : S.lastSyncAt ? `Last synced ${new Date(S.lastSyncAt).toLocaleString()}` : 'Not synced yet.';
+}
 
 // ---------- text matching ----------
 const canon = c => String(c || '').replace(/\D/g, '').replace(/^0+/, ''); // UPC-A 012345 == EAN-13 0012345
@@ -508,7 +553,7 @@ function newItem(code, cand) {
     format: fmt, year: cand?.year || '', country: cand?.country || '', publisher: cand?.publisher || '', cover: cand?.cover || '',
     discogsId: cand?.discogsId || null, masterId: cand?.masterId || '', mbid: cand?.mbid || '', rgid: cand?.rgid || '', pcId: cand?.pcId || null,
     details: cand?.details || '', source: cand?.source || 'manual', copies: 1, notes: '', paid: '', needsInfo: !cand?.title,
-    addedAt: Date.now(),
+    addedAt: Date.now(), updatedAt: Date.now(),
   };
 }
 
@@ -681,7 +726,7 @@ async function importFile(file) {
   if (/\.json$/i.test(file.name)) {
     const data = safeJSON(text); const arr = Array.isArray(data) ? data : data?.items;
     if (!Array.isArray(arr)) return toast('Not a Stacks backup');
-    for (const it of arr) if (it?.id) { await DB.put(it); added++; }
+    for (const it of arr) if (it?.id) { await DB.put({ ...it, updatedAt: Date.now() }); added++; }
   } else {
     const [head, ...rows] = parseCSV(text); const h = head.map(x => x.trim().toLowerCase());
     const col = (r, ...names) => { for (const n of names) { const i = h.indexOf(n); if (i >= 0 && r[i]) return r[i].trim(); } return ''; };
@@ -698,7 +743,7 @@ async function importFile(file) {
       added++;
     }
   }
-  items = await DB.all(); renderAll(); toast(`Imported ${added} items`);
+  items = await loadItems(); renderAll(); toast(`Imported ${added} items`); scheduleSync(500);
 }
 
 // ---------- wiring ----------
@@ -717,7 +762,7 @@ function setMode(m) {
 }
 
 async function init() {
-  await DB.open(); items = await DB.all();
+  await DB.open(); items = await loadItems();
   navigator.storage?.persist?.();
   fillFormatSelect($('#fmtSelect'), S.format, true);
   $('#fmtSelect').onchange = e => { S.format = e.target.value; saveS(); };
@@ -744,7 +789,26 @@ async function init() {
   $('#impFile').onchange = e => { if (e.target.files[0]) importFile(e.target.files[0]); e.target.value = ''; };
   $('#libibBtns').innerHTML = Object.keys(LIBIB).map(c => `<button class="btn small" data-c="${c}">${CAT_LABEL[c]}</button>`).join('');
   $('#libibBtns').querySelectorAll('button').forEach(b => b.onclick = () => download(`libib_${LIBIB[b.dataset.c].file}_import.csv`, libibCSV(b.dataset.c), 'text/csv'));
-  $('#wipe').onclick = async () => { if (confirm('Delete every item on this device? Export a backup first!') && confirm('Really delete everything?')) { await DB.clear(); items = []; renderAll(); toast('Collection cleared'); } };
+  $('#wipe').onclick = async () => {
+    const msg = syncOn() ? 'Remove the collection from this device? Your cloud copy is kept and you can sync it back.' : 'Delete every item on this device? Export a backup first!';
+    if (confirm(msg) && confirm('Really clear this device?')) { await DB.clear(); items = []; S.lastPull = 0; S.lastPush = 0; saveS(); renderAll(); toast('Device cleared'); }
+  };
+  // cloud sync settings
+  $('#syncKey').value = S.syncKey;
+  $('#genKey').onclick = () => {
+    if (S.syncKey && !confirm('Replace your sync key? Other devices will need the new one.')) return;
+    const b = crypto.getRandomValues(new Uint8Array(24)); $('#syncKey').value = btoa(String.fromCharCode(...b)).replace(/[+/=]/g, c => ({ '+': '-', '/': '_', '=': '' }[c]));
+    $('#syncKey').type = 'text';
+  };
+  $('#copyKey').onclick = async () => { try { await navigator.clipboard.writeText($('#syncKey').value); toast('Copied'); } catch { $('#syncKey').type = 'text'; $('#syncKey').select(); } };
+  $('#syncNow').onclick = () => {
+    const k = $('#syncKey').value.trim();
+    if (k !== S.syncKey) { S.syncKey = k; S.lastPull = 0; S.lastPush = 0; } // new key = new cloud copy: send everything
+    S.proxyUrl = $('#proxyUrl').value.trim(); saveS(); runSync();
+  };
+  addEventListener('online', () => scheduleSync(500));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleSync(300); });
+  setSync(''); scheduleSync(800);
   setMode(S.mode); renderAll();
   // reset stuck lookups from a previous session
   for (const it of items.filter(i => i.looking)) { delete it.looking; await DB.put(it); }

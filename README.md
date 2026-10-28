@@ -36,7 +36,25 @@ There's no free "barcode database" that covers games well (UPCitemdb is mostly U
 
 ## Your data
 
-Everything is stored on your phone (IndexedDB) and never leaves it. Use **Settings → Export backup** now and then. You can also export Libib-ready CSVs (one per type, matching Libib's own templates), or import a Libib CSV export or a backup file.
+The phone is always the working copy, so scanning is instant and works with no signal. With your Stacks server set up (below), every change is also saved to **your own Cloudflare D1 database**:
+- **Persistent:** survives a lost or reset phone. Set up a new device with the same sync key and everything comes back.
+- **Synced:** your phone, iPad and laptop all see the same collection, including deletions. If two devices edit the same item, the newest edit wins.
+- **Private:** the database is in your own Cloudflare account and locked by your sync key. Nobody else, including the GitHub Pages site, can read it.
+
+Without a server, data stays only on the phone. Add Stacks to your Home Screen in that case: iOS can clear website storage that hasn't been used for a few weeks, but home-screen apps are kept. You can also use **Settings → Export backup**, export Libib-ready CSVs, or import a Libib CSV export.
+
+## Costs
+
+**$0.** Every service has a free tier that's far bigger than a personal collection needs:
+
+| Service | Free allowance | Your use |
+|---|---|---|
+| eBay Browse API | 5,000 lookups/day ([free](https://developer.ebay.com/develop/get-started/api-call-limits); a free "Application Growth Check" raises it) | 1 per new scan, cached for a day |
+| Cloudflare Workers | 100,000 requests/day | a few per scan |
+| Cloudflare D1 database | 5 GB, 5M reads and 100k writes per day | ~1 KB per item, so 10,000 items ≈ 10 MB |
+| GitHub Pages | free for public repos | hosts the app |
+
+None of these ask for a credit card on the free plan. If you ever exceed a limit, lookups just pause until midnight UTC; nothing gets charged.
 
 ## Setup
 
@@ -46,7 +64,7 @@ Everything is stored on your phone (IndexedDB) and never leaves it. Use **Settin
 
 Netlify Drop or Cloudflare Pages also work: drag the folder in.
 
-### 2. The lookup proxy, for automatic game and movie lookups, ~10 minutes, all free
+### 2. Your Stacks server: eBay lookups + cloud database, ~15 minutes, all free
 
 **a) Get eBay keys** (lets the proxy search eBay)
 1. Go to developer.ebay.com → **Join**, and sign in with your normal eBay account.
@@ -59,8 +77,14 @@ Netlify Drop or Cloudflare Pages also work: drag the folder in.
 2. Click **Edit code**, replace everything with `proxy/worker.js` from this repo, and click **Deploy**.
 3. Go to the worker's **Settings → Variables and Secrets → Add**. Add a *Secret* `EBAY_CLIENT_ID` (your App ID) and a *Secret* `EBAY_CLIENT_SECRET` (your Cert ID), then **Deploy**.
 
-**c) Connect Stacks**
-In Stacks → **Settings**, paste `https://stacks-proxy.<you>.workers.dev` into **Lookup proxy URL**, pick your **eBay country**, then tap **Save** and **Test sources**.
+**c) Add the database**
+1. In Cloudflare, go to **Storage & Databases → D1 → Create database** and name it `stacks`. Stacks creates the table itself.
+2. Back on the worker: **Settings → Bindings → Add → D1 database**. Set the variable name to `DB` and pick `stacks`.
+3. In Stacks → **Settings → Your Stacks server**, tap **Generate key**, then **Copy**.
+4. On the worker: **Settings → Variables and Secrets → Add**. Add a *Secret* `SYNC_KEY` and paste the key, then **Deploy**.
+
+**d) Connect Stacks**
+In Stacks → **Settings → Your Stacks server**, paste `https://stacks-proxy.<you>.workers.dev` into **Server URL**, pick your **eBay country**, then tap **Connect & sync now**. Everything already on your phone uploads. On any other device, enter the same URL and sync key.
 
 The worker only forwards these specific lookups (it can't be used as an open proxy), and it caches answers for a day to save your free quota.
 

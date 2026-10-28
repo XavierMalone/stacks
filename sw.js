@@ -1,6 +1,6 @@
 // Offline shell: the app itself is cached so thrift-store checks work with no signal.
 // API calls always go to the network (the collection is already on-device).
-const CACHE = 'stacks-v4';
+const CACHE = 'stacks-v5';
 const SHELL = ['./', 'index.html', 'app.js', 'vendor/zxing-reader.js', 'vendor/zxing_reader.wasm', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));
