@@ -1,0 +1,11 @@
+// Deploy the Stacks server with: npx wrangler deploy  (run inside this folder)
+// Secrets are set separately and survive deploys: wrangler secret put SYNC_KEY / EBAY_CLIENT_ID / EBAY_CLIENT_SECRET
+{
+  "name": "stacks-proxy",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "stacks", "database_id": "87ec4015-9574-46dc-8914-a363a6b44f52" }
+  ]
+}
