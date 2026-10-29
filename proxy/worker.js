@@ -32,7 +32,8 @@ export default {
     } else if (u.pathname === '/ebay') {
       if (!env.EBAY_CLIENT_ID || !env.EBAY_CLIENT_SECRET) return out({ error: 'eBay keys not set on the worker' }, 501);
       const m = MARKETS.includes(u.searchParams.get('m')) ? u.searchParams.get('m') : 'EBAY_US';
-      res = out(await ebay(env, code, m));
+      try { res = out(await ebay(env, code, m)); }
+      catch (e) { return out({ error: String(e.message || e) }, 502); }
     } else return out({ error: 'not found' }, 404);
 
     if (res.status === 200) { const r = res.clone(); r.headers.set('cache-control', 'public, max-age=86400'); ctx.waitUntil(cache.put(key, r)); }
@@ -54,7 +55,7 @@ async function ebayToken(env) {
     body: 'grant_type=client_credentials&scope=' + encodeURIComponent('https://api.ebay.com/oauth/api_scope'),
   });
   const j = await r.json();
-  if (!j.access_token) throw new Error('eBay auth failed: ' + (j.error_description || r.status));
+  if (!j.access_token) throw new Error('eBay auth failed: ' + (j.error_description || j.error || r.status));
   token = j.access_token; tokenExp = Date.now() + (j.expires_in - 120) * 1000;
   return token;
 }
